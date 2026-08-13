@@ -36,7 +36,7 @@ The table below reflects time measurements for typical Help Desk workflows at a 
 
 A team processing ten account unlocks and one ten-user onboarding batch per day recovers approximately 2.5 technician hours daily. Annualized, that is around 600 hours per technician.
 
-The audit log format is pipe-delimited and SIEM-ready. It records operator identity, machine hostname, action category, and timestamp for every operation. This satisfies documentation requirements under SOC 2, ISO 27001, and HIPAA without additional tooling.
+The audit log format is pipe-delimited and SIEM-ready. It records operator identity, machine hostname, action category, and timestamp for every operation. 
 
 ---
 
