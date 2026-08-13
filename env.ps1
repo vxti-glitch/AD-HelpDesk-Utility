@@ -1,7 +1,7 @@
 $ver = $PSVersionTable.PSVersion
 Write-Host "PowerShell Version : $ver"
 
-$isDomain = (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain
+$isDomain = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
 Write-Host "Domain Joined      : $isDomain"
 
 $adMod = Get-Module -ListAvailable -Name ActiveDirectory
