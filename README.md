@@ -36,7 +36,7 @@ The table below reflects time measurements for typical Help Desk workflows at a 
 
 A team processing ten account unlocks and one ten-user onboarding batch per day recovers approximately 2.5 technician hours daily. Annualized, that is around 600 hours per technician.
 
-The audit log format is pipe-delimited and SIEM-ready. It records operator identity, machine hostname, action category, and timestamp for every operation. 
+The audit log format is pipe-delimited and SIEM-ready. It records operator identity, machine hostname, action category, and timestamp for every operation. This supports organizational audit workflows and security reviews without additional tooling.
 
 ---
 
@@ -163,6 +163,8 @@ Severity levels: INFO, SUCCESS, WARNING, ERROR.
 ```
 ad-helpdesk-utility/
 ├── AD-HelpDesk-Utility.ps1   # Main script
+├── modules/
+│   └── ADHelpDeskCore.psm1   # Core logic module
 ├── README.md
 ├── data/
 │   └── sample-users.csv      # Example input for bulk provisioning

@@ -5,7 +5,7 @@ Write-Host "OS                 : $([System.Environment]::OSVersion.VersionString
 Write-Host "Running as         : $env:USERNAME on $env:COMPUTERNAME" -ForegroundColor White
 
 # Check domain join
-$domainStatus = (Get-WmiObject -Class Win32_ComputerSystem).PartOfDomain
+$domainStatus = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
 Write-Host "Domain Joined      : $domainStatus" -ForegroundColor $(if ($domainStatus) {"Green"} else {"Red"})
 
 # Check AD module
