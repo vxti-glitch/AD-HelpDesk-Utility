@@ -1,4 +1,4 @@
-Write-Host ""
+﻿Write-Host ""
 Write-Host "=== Environment Check ===" -ForegroundColor Cyan
 Write-Host "PowerShell Version : $($PSVersionTable.PSVersion)" -ForegroundColor White
 Write-Host "OS                 : $([System.Environment]::OSVersion.VersionString)" -ForegroundColor White

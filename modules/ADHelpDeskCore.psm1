@@ -1,4 +1,4 @@
-function Initialize-ADHelpDeskCore {
+﻿function Initialize-ADHelpDeskCore {
     param($DemoMode, $LogPath, $DefaultOU, $Domain, $ScriptName)
     $script:DemoMode   = $DemoMode
     $script:LogPath    = $LogPath
@@ -118,6 +118,69 @@ function Write-Log {
         default   { "Cyan"   }
     }
     Write-Host "  [$Level] $demoTag$Message" -ForegroundColor $colour
+}
+
+function New-ComplexPassword {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [ValidateRange(12, 128)]
+        [int]$Length = 16
+    )
+
+    $upper   = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+    $lower   = 'abcdefghjkmnpqrstuvwxyz'
+    $digits  = '23456789'
+    $special = '!@#$%^&*()-_=+'
+    $all     = $upper + $lower + $digits + $special
+
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $chars = [System.Collections.Generic.List[char]]::new()
+        foreach ($set in @($upper, $lower, $digits, $special)) {
+            $bytes = [byte[]]::new(4)
+            $rng.GetBytes($bytes)
+            $idx = [BitConverter]::ToUInt32($bytes, 0) % $set.Length
+            $chars.Add($set[$idx])
+        }
+
+        while ($chars.Count -lt $Length) {
+            $bytes = [byte[]]::new(4)
+            $rng.GetBytes($bytes)
+            $idx = [BitConverter]::ToUInt32($bytes, 0) % $all.Length
+            $chars.Add($all[$idx])
+        }
+
+        for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+            $bytes = [byte[]]::new(4)
+            $rng.GetBytes($bytes)
+            $j = [BitConverter]::ToUInt32($bytes, 0) % ($i + 1)
+            $tmp = $chars[$i]
+            $chars[$i] = $chars[$j]
+            $chars[$j] = $tmp
+        }
+
+        return -join $chars
+    }
+    finally {
+        $rng.Dispose()
+    }
+}
+
+function Escape-ADFilterLiteral {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return '' }
+    return ($Value -replace "'", "''")
+}
+
+function Escape-ADDistinguishedNameValue {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value) { return '' }
+    $escaped = $Value -replace '([,=+<>#;\\"])', '\$1'
+    $escaped = $escaped -replace '^\s', '\ '
+    $escaped = $escaped -replace '\s$', '\ '
+    return $escaped
 }
 
 # ---------------------------------------------------------------------------
@@ -243,6 +306,9 @@ function Show-Menu {
 #           responses that mirror real AD output timing and messaging.
 # ---------------------------------------------------------------------------
 function Invoke-BulkProvisioning {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
     Write-Host ""
     Write-Host "  -- Bulk User Provisioning ------------------------------------------" -ForegroundColor DarkCyan
     Write-Log -Message "Bulk provisioning initiated." -Level "INFO" -Action "BulkProvision"
@@ -257,10 +323,16 @@ function Invoke-BulkProvisioning {
     }
 
     try {
-        $users = Import-Csv -Path $csvPath -ErrorAction Stop
+        $users = @(Import-Csv -Path $csvPath -ErrorAction Stop)
     }
     catch {
         Write-Log -Message "Failed to import CSV. Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
+        Pause-AndReturn
+        return
+    }
+
+    if ($users.Count -eq 0) {
+        Write-Log -Message "CSV contains no user rows: $csvPath" -Level "ERROR" -Action "BulkProvision"
         Pause-AndReturn
         return
     }
@@ -286,23 +358,27 @@ function Invoke-BulkProvisioning {
         $domainDN = (Get-ADDomain -ErrorAction Stop).DistinguishedName
     }
 
+    $defaultParentOU = if ([string]::IsNullOrWhiteSpace($script:DefaultOU)) { $domainDN } else { $script:DefaultOU }
     Write-Host ""
     Write-Host "  Department OUs will be created under a parent OU." -ForegroundColor Gray
     Write-Host "  Example: OU=Staff,$domainDN" -ForegroundColor Gray
-    $parentOU = Read-Host "  Enter parent OU distinguished name (press ENTER for domain root)"
-    if ([string]::IsNullOrWhiteSpace($parentOU)) { $parentOU = $domainDN }
+    Write-Host "  Default: $defaultParentOU" -ForegroundColor Gray
+    $parentOU = Read-Host "  Enter parent OU distinguished name (press ENTER for default)"
+    if ([string]::IsNullOrWhiteSpace($parentOU)) { $parentOU = $defaultParentOU }
 
     $created = 0
     $skipped = 0
     $failed  = 0
 
     foreach ($row in $users) {
-        $firstName  = $row.FirstName.Trim()
-        $lastName   = $row.LastName.Trim()
-        $department = $row.Department.Trim()
+        $firstName  = ([string]$row.FirstName).Trim()
+        $lastName   = ([string]$row.LastName).Trim()
+        $department = ([string]$row.Department).Trim()
 
-        if ([string]::IsNullOrWhiteSpace($firstName) -or [string]::IsNullOrWhiteSpace($lastName)) {
-            Write-Log -Message "Skipping row -- FirstName or LastName blank." -Level "WARNING" -Action "BulkProvision"
+        if ([string]::IsNullOrWhiteSpace($firstName) -or
+            [string]::IsNullOrWhiteSpace($lastName) -or
+            [string]::IsNullOrWhiteSpace($department)) {
+            Write-Log -Message "Skipping row -- FirstName, LastName, or Department blank." -Level "WARNING" -Action "BulkProvision"
             $skipped++
             continue
         }
@@ -313,12 +389,12 @@ function Invoke-BulkProvisioning {
 
         $upn         = "$sam@$($script:Domain)"
         $displayName = "$firstName $lastName"
-        $title       = if ($row.PSObject.Properties.Name -contains "Title")        { $row.Title.Trim() }        else { "" }
-        $managerSam  = if ($row.PSObject.Properties.Name -contains "Manager")      { $row.Manager.Trim() }      else { "" }
-        $tempPassRaw = if ($row.PSObject.Properties.Name -contains "TempPassword") { $row.TempPassword.Trim() } else { "" }
+        $title       = if ($row.PSObject.Properties.Name -contains "Title")        { ([string]$row.Title).Trim() }        else { "" }
+        $managerSam  = if ($row.PSObject.Properties.Name -contains "Manager")      { ([string]$row.Manager).Trim() }      else { "" }
+        $tempPassRaw = if ($row.PSObject.Properties.Name -contains "TempPassword") { ([string]$row.TempPassword).Trim() } else { "" }
 
         if ([string]::IsNullOrWhiteSpace($tempPassRaw)) {
-            $tempPassRaw = "Welcome@$(Get-Random -Minimum 1000 -Maximum 9999)!"
+            $tempPassRaw = New-ComplexPassword -Length 16
         }
 
         Invoke-DemoDelay -Ms 350
@@ -334,7 +410,8 @@ function Invoke-BulkProvisioning {
             }
 
             # ---- DEMO: Simulate OU check/create ----
-            $deptOUName = "OU=$department,$parentOU"
+            $departmentDn = Escape-ADDistinguishedNameValue -Value $department
+            $deptOUName = "OU=$departmentDn,$parentOU"
             $ouExists   = ($department -in @("Finance","Engineering","Human Resources","IT Support","Marketing"))
             if (-not $ouExists) {
                 Write-Log -Message "Created new OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
@@ -360,7 +437,8 @@ function Invoke-BulkProvisioning {
         else {
             # ---- REAL MODE ----
             $existingUser = $null
-            try { $existingUser = Get-ADUser -Filter "SamAccountName -eq '$sam'" -ErrorAction Stop } catch { $existingUser = $null }
+            $samFilter = Escape-ADFilterLiteral -Value $sam
+            try { $existingUser = Get-ADUser -Filter "SamAccountName -eq '$samFilter'" -ErrorAction Stop } catch { $existingUser = $null }
 
             if ($null -ne $existingUser) {
                 Write-Log -Message "SKIP -- User '$sam' already exists. Skipping $displayName." -Level "WARNING" -Action "BulkProvision"
@@ -368,15 +446,22 @@ function Invoke-BulkProvisioning {
                 continue
             }
 
-            $deptOUName = "OU=$department,$parentOU"
+            $departmentDn = Escape-ADDistinguishedNameValue -Value $department
+            $deptOUName = "OU=$departmentDn,$parentOU"
             $targetOU   = $deptOUName
             $ouExists   = $null
-            try { $ouExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$deptOUName'" -ErrorAction Stop } catch { $ouExists = $null }
+            $deptOUFilter = Escape-ADFilterLiteral -Value $deptOUName
+            try { $ouExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$deptOUFilter'" -ErrorAction Stop } catch { $ouExists = $null }
 
             if ($null -eq $ouExists) {
                 try {
-                    New-ADOrganizationalUnit -Name $department -Path $parentOU -ProtectedFromAccidentalDeletion $true -ErrorAction Stop
-                    Write-Log -Message "Created new OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
+                    if ($PSCmdlet.ShouldProcess($deptOUName, "Create department OU")) {
+                        New-ADOrganizationalUnit -Name $department -Path $parentOU -ProtectedFromAccidentalDeletion $true -ErrorAction Stop
+                        Write-Log -Message "Created new OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
+                    }
+                    else {
+                        Write-Log -Message "WhatIf: skipped OU creation for '$department' under '$parentOU'." -Level "WARNING" -Action "BulkProvision"
+                    }
                 }
                 catch {
                     Write-Log -Message "Could not create OU '$department'. Placing in parent OU. Error: $($_.Exception.Message)" -Level "WARNING" -Action "BulkProvision"
@@ -413,9 +498,15 @@ function Invoke-BulkProvisioning {
             }
 
             try {
-                New-ADUser @newUserParams
-                Write-Log -Message "CREATED user '$sam' ($displayName) | Dept=$department | OU=$targetOU | UPN=$upn" -Level "SUCCESS" -Action "BulkProvision"
-                $created++
+                if ($PSCmdlet.ShouldProcess($upn, "Create AD user")) {
+                    New-ADUser @newUserParams
+                    Write-Log -Message "CREATED user '$sam' ($displayName) | Dept=$department | OU=$targetOU | UPN=$upn" -Level "SUCCESS" -Action "BulkProvision"
+                    $created++
+                }
+                else {
+                    Write-Log -Message "WhatIf: skipped user creation for '$sam' ($displayName)." -Level "WARNING" -Action "BulkProvision"
+                    $skipped++
+                }
             }
             catch {
                 Write-Log -Message "FAILED to create '$sam' ($displayName). Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
@@ -438,6 +529,9 @@ function Invoke-BulkProvisioning {
 #           operations are simulated with a realistic delay.
 # ---------------------------------------------------------------------------
 function Invoke-AccountUnlockReset {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
     Write-Host ""
     Write-Host "  -- Account Unlock & Password Reset ---------------------------------" -ForegroundColor DarkCyan
     Write-Log -Message "Account Unlock/Reset initiated." -Level "INFO" -Action "UnlockReset"
@@ -496,13 +590,18 @@ function Invoke-AccountUnlockReset {
         $enableChoice = Read-Host "  Do you also want to ENABLE this account? (Y/N)"
         if ($enableChoice -match '^[Yy]$') {
             Invoke-DemoDelay -Ms 300
-            if ($script:DemoMode) {
-                $script:DemoUsers[$sam].Enabled = $true
+            if ($PSCmdlet.ShouldProcess($sam, "Enable AD account")) {
+                if ($script:DemoMode) {
+                    $script:DemoUsers[$sam].Enabled = $true
+                }
+                else {
+                    Enable-ADAccount -Identity $sam -ErrorAction Stop
+                }
+                Write-Log -Message "Account '$sam' has been ENABLED." -Level "SUCCESS" -Action "UnlockReset"
             }
             else {
-                Enable-ADAccount -Identity $sam -ErrorAction Stop
+                Write-Log -Message "WhatIf: skipped enabling disabled account '$sam'." -Level "WARNING" -Action "UnlockReset"
             }
-            Write-Log -Message "Account '$sam' has been ENABLED." -Level "SUCCESS" -Action "UnlockReset"
         }
         else {
             Write-Log -Message "Operator chose NOT to enable disabled account '$sam'." -Level "INFO" -Action "UnlockReset"
@@ -513,14 +612,19 @@ function Invoke-AccountUnlockReset {
     if ($adUser.LockedOut) {
         Invoke-DemoDelay -Ms 450
         try {
-            if ($script:DemoMode) {
-                $script:DemoUsers[$sam].LockedOut    = $false
-                $script:DemoUsers[$sam].BadLogonCount = 0
+            if ($PSCmdlet.ShouldProcess($sam, "Unlock AD account")) {
+                if ($script:DemoMode) {
+                    $script:DemoUsers[$sam].LockedOut    = $false
+                    $script:DemoUsers[$sam].BadLogonCount = 0
+                }
+                else {
+                    Unlock-ADAccount -Identity $sam -ErrorAction Stop
+                }
+                Write-Log -Message "Account '$sam' successfully UNLOCKED." -Level "SUCCESS" -Action "UnlockReset"
             }
             else {
-                Unlock-ADAccount -Identity $sam -ErrorAction Stop
+                Write-Log -Message "WhatIf: skipped unlocking account '$sam'." -Level "WARNING" -Action "UnlockReset"
             }
-            Write-Log -Message "Account '$sam' successfully UNLOCKED." -Level "SUCCESS" -Action "UnlockReset"
         }
         catch {
             Write-Log -Message "Failed to unlock '$sam'. Error: $($_.Exception.Message)" -Level "ERROR" -Action "UnlockReset"
@@ -535,23 +639,28 @@ function Invoke-AccountUnlockReset {
     $newPassRaw = Read-Host "  New Password"
 
     if ([string]::IsNullOrWhiteSpace($newPassRaw)) {
-        $newPassRaw = "TempPass@$(Get-Random -Minimum 1000 -Maximum 9999)!"
+        $newPassRaw = New-ComplexPassword -Length 16
         Write-Host "  Auto-generated password: $newPassRaw" -ForegroundColor Yellow
         Write-Log -Message "Auto-generated temporary password for '$sam'." -Level "INFO" -Action "UnlockReset"
     }
 
     Invoke-DemoDelay -Ms 500
     try {
-        if ($script:DemoMode) {
-            $script:DemoUsers[$sam].PasswordLastSet = Get-Date
-            # (Password itself is not stored — same as real AD behavior for compliance)
+        if ($PSCmdlet.ShouldProcess($sam, "Reset password and require change at next logon")) {
+            if ($script:DemoMode) {
+                $script:DemoUsers[$sam].PasswordLastSet = Get-Date
+                # (Password itself is not stored — same as real AD behavior for compliance)
+            }
+            else {
+                $securePass = ConvertTo-SecureString -String $newPassRaw -AsPlainText -Force
+                Set-ADAccountPassword -Identity $sam -NewPassword $securePass -Reset -ErrorAction Stop
+                Set-ADUser -Identity $sam -ChangePasswordAtLogon $true -ErrorAction Stop
+            }
+            Write-Log -Message "Password RESET for '$sam'. ChangePasswordAtLogon=True." -Level "SUCCESS" -Action "UnlockReset"
         }
         else {
-            $securePass = ConvertTo-SecureString -String $newPassRaw -AsPlainText -Force
-            Set-ADAccountPassword -Identity $sam -NewPassword $securePass -Reset -ErrorAction Stop
-            Set-ADUser -Identity $sam -ChangePasswordAtLogon $true -ErrorAction Stop
+            Write-Log -Message "WhatIf: skipped password reset for '$sam'." -Level "WARNING" -Action "UnlockReset"
         }
-        Write-Log -Message "Password RESET for '$sam'. ChangePasswordAtLogon=True." -Level "SUCCESS" -Action "UnlockReset"
     }
     catch {
         Write-Log -Message "Failed to reset password for '$sam'. Error: $($_.Exception.Message)" -Level "ERROR" -Action "UnlockReset"
@@ -566,6 +675,9 @@ function Invoke-AccountUnlockReset {
 #           and Add-ADGroupMember are simulated against $script:DemoGroups.
 # ---------------------------------------------------------------------------
 function Invoke-GroupManagement {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
     Write-Host ""
     Write-Host "  -- Security Group Management ---------------------------------------" -ForegroundColor DarkCyan
     Write-Log -Message "Group Management initiated." -Level "INFO" -Action "GroupMgmt"
@@ -619,7 +731,8 @@ function Invoke-GroupManagement {
         }
         catch {
             try {
-                $adGroup = Get-ADGroup -Filter "Name -eq '$groupName'" -Properties GroupCategory, GroupScope -ErrorAction Stop
+                $groupFilter = Escape-ADFilterLiteral -Value $groupName
+                $adGroup = Get-ADGroup -Filter "Name -eq '$groupFilter'" -Properties GroupCategory, GroupScope -ErrorAction Stop
                 if ($null -eq $adGroup) { throw "Group not found." }
             }
             catch {
@@ -667,16 +780,21 @@ function Invoke-GroupManagement {
     # ---- Add user to group ----
     Invoke-DemoDelay -Ms 500
     try {
-        if ($script:DemoMode) {
-            # Mutate the demo group's member list in-memory
-            $updatedMembers = [System.Collections.ArrayList]@($adGroup.Members)
-            $updatedMembers.Add($sam) | Out-Null
-            $script:DemoGroups[$groupName].Members = $updatedMembers.ToArray()
+        if ($PSCmdlet.ShouldProcess("$sam -> $($adGroup.Name)", "Add user to AD group")) {
+            if ($script:DemoMode) {
+                # Mutate the demo group's member list in-memory
+                $updatedMembers = [System.Collections.ArrayList]@($adGroup.Members)
+                $updatedMembers.Add($sam) | Out-Null
+                $script:DemoGroups[$groupName].Members = $updatedMembers.ToArray()
+            }
+            else {
+                Add-ADGroupMember -Identity $adGroup.SamAccountName -Members $sam -ErrorAction Stop
+            }
+            Write-Log -Message "SUCCESS -- '$sam' ($($adUser.DisplayName)) added to group '$($adGroup.Name)'." -Level "SUCCESS" -Action "GroupMgmt"
         }
         else {
-            Add-ADGroupMember -Identity $adGroup.SamAccountName -Members $sam -ErrorAction Stop
+            Write-Log -Message "WhatIf: skipped adding '$sam' to '$($adGroup.Name)'." -Level "WARNING" -Action "GroupMgmt"
         }
-        Write-Log -Message "SUCCESS -- '$sam' ($($adUser.DisplayName)) added to group '$($adGroup.Name)'." -Level "SUCCESS" -Action "GroupMgmt"
     }
     catch {
         Write-Log -Message "FAILED -- Could not add '$sam' to '$($adGroup.Name)'. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
