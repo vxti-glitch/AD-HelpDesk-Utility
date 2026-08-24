@@ -1,4 +1,4 @@
-$ver = $PSVersionTable.PSVersion
+﻿$ver = $PSVersionTable.PSVersion
 Write-Host "PowerShell Version : $ver"
 
 $isDomain = (Get-CimInstance -ClassName Win32_ComputerSystem).PartOfDomain
