@@ -1,9 +1,9 @@
 FirstName,LastName,Department,Title,Manager,TempPassword
-Jane,Smith,Finance,Financial Analyst,jdoe,Welcome@2024!
+Jane,Smith,Finance,Financial Analyst,jdoe,
 Carlos,Rivera,Engineering,Software Engineer,,
-Aisha,Patel,Human Resources,HR Coordinator,mbrown,Welcome@2024!
+Aisha,Patel,Human Resources,HR Coordinator,mbrown,
 Tom,Chen,Engineering,DevOps Engineer,jdoe,
-Sarah,Okonkwo,Finance,Senior Accountant,jsmith,Welcome@2024!
+Sarah,Okonkwo,Finance,Senior Accountant,jsmith,
 Marcus,Bell,IT Support,Help Desk Technician,,
 Lena,Fischer,Marketing,Marketing Specialist,awhite,
-Derek,Johnson,Human Resources,Recruiter,mbrown,Welcome@2024!
+Derek,Johnson,Human Resources,Recruiter,mbrown,
