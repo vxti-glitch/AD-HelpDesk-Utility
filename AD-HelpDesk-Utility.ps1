@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 
 <#
 .SYNOPSIS
@@ -32,7 +32,7 @@
     Launches the tool and writes audit logs to a custom path.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 param(
     # Run in Demo Mode: all AD operations are simulated. No domain or RSAT needed.
     [Parameter(Mandatory = $false)]
