@@ -7,6 +7,7 @@
 ![ActiveDirectory](https://img.shields.io/badge/Module-ActiveDirectory%20(RSAT)-darkgreen?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 ![Demo Mode](https://img.shields.io/badge/Demo%20Mode-Available-orange?style=for-the-badge)
+[![PowerShell validation](https://github.com/vxti-glitch/AD-HelpDesk-Utility/actions/workflows/powershell-validate.yml/badge.svg)](https://github.com/vxti-glitch/AD-HelpDesk-Utility/actions/workflows/powershell-validate.yml)
 
 </div>
 
@@ -121,6 +122,15 @@ Pre-seeded groups for testing:
 
 # Pre-specify domain and default OU
 .\AD-HelpDesk-Utility.ps1 -Domain "contoso.com" -DefaultUserOU "OU=Users,DC=contoso,DC=com"
+```
+
+### Run the automated tests
+
+The Pester suite verifies password generation and directory-input escaping without requiring Active Directory or RSAT:
+
+```powershell
+Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser
+Invoke-Pester -Path .\tests -CI -Output Detailed
 ```
 
 ### CSV format for bulk provisioning (Option 1)
