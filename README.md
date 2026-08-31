@@ -1,210 +1,86 @@
-<div align="center">
-
 # Active Directory Help Desk Utility
 
-![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?style=for-the-badge&logo=powershell&logoColor=white)
-![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20%7C%20Server%202016%2B-0078D4?style=for-the-badge&logo=windows&logoColor=white)
-![ActiveDirectory](https://img.shields.io/badge/Module-ActiveDirectory%20(RSAT)-darkgreen?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
-![Demo Mode](https://img.shields.io/badge/Demo%20Mode-Available-orange?style=for-the-badge)
-[![PowerShell validation](https://github.com/vxti-glitch/AD-HelpDesk-Utility/actions/workflows/powershell-validate.yml/badge.svg)](https://github.com/vxti-glitch/AD-HelpDesk-Utility/actions/workflows/powershell-validate.yml)
+I built this small PowerShell utility to practice safe, routine Active Directory support workflows: CSV-based user creation, account unlock and temporary-password reset, and security-group membership. The repository includes a clearly simulated demo mode so I can exercise the control flow without claiming access to a live organization or production directory.
 
-</div>
+The current CI suite uses mocks, pure guard functions, and offline demo paths. It does not prove behavior against a real domain, delegated permissions, replication, password policy, or domain-controller failures; an authorized AD lab is still required for that evidence.
 
----
+## Safety behavior
 
-## Overview
+- Directory lookup errors are not treated as “not found.” Access denied, unreachable directory services, ambiguous results, and unexpected failures stop the affected change.
+- User creation requires a confirmed-missing account and exactly one existing target OU.
+- Target OUs must be within `-AllowedBaseDN`. The default boundary is the configured parent/default OU.
+- Missing department OUs are not created by default. `-CreateMissingOUs` is explicit, has its own `ShouldProcess` and interactive confirmation boundary, and requires delegated OU-creation permission.
+- `-WhatIf` performs no user, OU, password, unlock, enable, or group writes and reports planned/skipped actions as such.
+- Temporary passwords use `RandomNumberGenerator`, are marked `ChangePasswordAtLogon`, and are never written to the local activity log. The interactive console may display an auto-generated password once so the operator can transfer it through an approved channel.
 
-A menu-driven PowerShell script for performing common Active Directory tasks without opening ADUC. Written for Help Desk and junior SysAdmin teams who handle routine account work at volume.
+## Local activity log boundary
 
-The script covers four operations: bulk user creation from CSV, account unlock and password reset, security group membership, and audit logging. It does not require a GUI. It does not require elevated domain privileges beyond what the task actually needs.
+The pipe-delimited file is a structured local activity log. It is editable and is not tamper-evident, compliance-grade, or a security audit trail. A real audit design would require access controls, centralized forwarding, retention policy, monitoring, clock controls, and integrity protections appropriate to the organization.
 
-A `-DemoMode` switch is included. It runs a full simulated session with pre-seeded users and groups on any Windows machine with PowerShell 5.1. No domain, no RSAT, no lab environment required.
-
----
-
-## Business Value
-
-The table below reflects time measurements for typical Help Desk workflows at a 500-seat organization. The numbers are conservative.
-
-| Task | Manual Process (ADUC) | This Script | Time Recovered |
-|---|---|---|---|
-| Create one user account | ~8 min | ~30 sec | ~7.5 min |
-| Onboard 20 users | ~160 min | ~2 min | ~158 min |
-| Unlock account and reset password | ~4 min | ~30 sec | ~3.5 min |
-| Add user to a security group | ~3 min | ~20 sec | ~2.7 min |
-| Produce audit evidence for a review | Hours of log reconstruction | Immediate export | Hours |
-
-A team processing ten account unlocks and one ten-user onboarding batch per day recovers approximately 2.5 technician hours daily. Annualized, that is around 600 hours per technician.
-
-The audit log format is pipe-delimited and SIEM-ready. It records operator identity, machine hostname, action category, and timestamp for every operation. This supports organizational audit workflows and security reviews without additional tooling.
-
----
-
-## Features
-
-- Bulk user provisioning from CSV with automatic department OU creation
-- Deterministic SamAccountName generation with duplicate detection before write
-- Account unlock and password reset in a single workflow, including handling for disabled accounts
-- Security group membership with pre-flight duplicate member check and Distribution group warning
-- Pipe-delimited audit log written to disk on every action, compatible with Splunk, QRadar, and Excel
-- In-console log viewer requiring no separate editor
-- Demo Mode simulating all AD operations with realistic delays and pre-seeded data
-- Try/catch error handling at the individual operation level; one failed step does not abort the session
-
----
+The log includes operator and machine identifiers, so store and share it carefully.
 
 ## Requirements
 
-| Requirement | Details |
-|---|---|
-| OS | Windows 10/11 or Windows Server 2016 and later |
-| PowerShell | 5.1 or higher |
-| RSAT Module | ActiveDirectory module (not required in Demo Mode) |
-| AD Permissions | Create User Objects, Reset Password, Modify Group Membership on target OUs |
-| Network | Line-of-sight to a Domain Controller |
+- Windows PowerShell 5.1 or PowerShell 7 for offline/demo checks
+- ActiveDirectory RSAT module and authorized domain connectivity for real mode
+- Only the delegated permissions required for the selected operation
+- Pester 5 for the documented tests
+- PSScriptAnalyzer for static analysis
 
-### Install the ActiveDirectory Module
+Do not run the utility as Domain Admin merely for convenience.
 
-```powershell
-# Windows 10 / 11
-Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
-
-# Windows Server
-Install-WindowsFeature -Name RSAT-AD-PowerShell
-```
-
----
-
-## How to Use
-
-### Clone the repository
-
-```bash
-git clone https://github.com/your-username/ad-helpdesk-utility.git
-cd ad-helpdesk-utility
-```
-
-### Run in Demo Mode
-
-No domain or RSAT installation required.
+## Run the simulated path
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\AD-HelpDesk-Utility.ps1 -DemoMode
+git clone https://github.com/vxti-glitch/AD-HelpDesk-Utility.git
+cd AD-HelpDesk-Utility
+.\AD-HelpDesk-Utility.ps1 -DemoMode
 ```
 
-Pre-seeded accounts for testing:
+Demo users and groups are synthetic. Demo-mode actions are in-memory simulations plus the editable local log; they are not live AD evidence.
 
-| Username | State | Tests |
-|---|---|---|
-| jsmith | Locked out, 6 bad logons | Option 2 — Unlock and Reset |
-| apatel | Disabled | Option 2 — Enable and Reset |
-| crivera | Active | Option 3 — Group Add |
-| mbrown | Active | Option 3 — Group Add |
-
-Pre-seeded groups for testing:
-
-| Group Name | Category | Tests |
-|---|---|---|
-| HR-Staff | Security / Global | Standard group add |
-| Engineering-All | Security / Global | Duplicate member detection |
-| Finance-ReadOnly | Security / Global | Standard group add |
-| All-Marketing-Dist | Distribution / Universal | Distribution group warning |
-
-### Run against a real domain
+## Run against an authorized lab
 
 ```powershell
-# Auto-detect domain
-.\AD-HelpDesk-Utility.ps1
-
-# Specify a custom log path
-.\AD-HelpDesk-Utility.ps1 -LogPath "D:\Logs\ADHelpDesk.log"
-
-# Pre-specify domain and default OU
-.\AD-HelpDesk-Utility.ps1 -Domain "contoso.com" -DefaultUserOU "OU=Users,DC=contoso,DC=com"
+.\AD-HelpDesk-Utility.ps1 `
+  -Domain 'lab.example' `
+  -DefaultUserOU 'OU=Staff,DC=lab,DC=example' `
+  -AllowedBaseDN 'OU=Staff,DC=lab,DC=example'
 ```
 
-### Run the automated tests
-
-The Pester suite verifies password generation and directory-input escaping without requiring Active Directory or RSAT:
+To permit a separate OU-creation confirmation:
 
 ```powershell
-Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser
-Invoke-Pester -Path .\tests -CI -Output Detailed
+.\AD-HelpDesk-Utility.ps1 `
+  -Domain 'lab.example' `
+  -DefaultUserOU 'OU=Staff,DC=lab,DC=example' `
+  -AllowedBaseDN 'OU=Staff,DC=lab,DC=example' `
+  -CreateMissingOUs
 ```
 
-### CSV format for bulk provisioning (Option 1)
+Preview writes first:
 
-Sample file included at `data/sample-users.csv`.
-
-| Column | Required | Description |
-|---|---|---|
-| FirstName | Yes | First name |
-| LastName | Yes | Last name |
-| Department | Yes | Used as OU name; OU is created if it does not exist |
-| Title | No | Job title |
-| Manager | No | SamAccountName of the manager |
-| TempPassword | No | Auto-generated if left blank |
-
----
-
-## Audit Log Format
-
-One pipe-delimited line per action. Written to `Logs\ADHelpDesk_YYYY-MM.log`. A new file is created each calendar month.
-
-```
-TIMESTAMP | LEVEL | ACTION | Operator=USERNAME | Machine=HOSTNAME | MESSAGE
+```powershell
+.\AD-HelpDesk-Utility.ps1 -WhatIf -Domain 'lab.example' `
+  -DefaultUserOU 'OU=Staff,DC=lab,DC=example' `
+  -AllowedBaseDN 'OU=Staff,DC=lab,DC=example'
 ```
 
-Example output:
+The CSV columns are `FirstName`, `LastName`, and `Department`, with optional `Title`, `Manager`, and `TempPassword`. Prefer leaving `TempPassword` blank so the cryptographic generator is used. `data/sample-users.csv` is synthetic.
 
-```
-2026-08-08 19:24:21 | SUCCESS | UnlockReset | Operator=jtech01 | Machine=HELPDESK-PC1 | Account 'jsmith' successfully UNLOCKED.
-2026-08-08 19:24:26 | SUCCESS | UnlockReset | Operator=jtech01 | Machine=HELPDESK-PC1 | Password RESET for 'jsmith'. ChangePasswordAtLogon=True.
-2026-08-08 19:24:41 | SUCCESS | GroupMgmt   | Operator=jtech01 | Machine=HELPDESK-PC1 | 'jsmith' (Jane Smith) added to group 'HR-Staff'.
-```
+## Verification
 
-Severity levels: INFO, SUCCESS, WARNING, ERROR.
-
----
-
-## Project Structure
-
-```
-ad-helpdesk-utility/
-├── AD-HelpDesk-Utility.ps1   # Main script
-├── modules/
-│   └── ADHelpDeskCore.psm1   # Core logic module
-├── README.md
-├── data/
-│   └── sample-users.csv      # Example input for bulk provisioning
-└── Logs/                     # Created at runtime; not committed to version control
-    └── .gitkeep
+```powershell
+Invoke-ScriptAnalyzer -Path . -Recurse
+Invoke-Pester .\tests -CI -Output Detailed
 ```
 
----
+The tests cover cryptographic password shape, input escaping, confirmed absence, access denied, unreachable service, ambiguous/pre-existing lookup states, allowed/disallowed OU paths, explicit OU creation in demo mode, and `WhatIf` no-change behavior. They do not print or persist temporary passwords.
 
-## Security Notes
+## Current evidence boundary
 
-- Run the script under a delegated AD service account scoped to the minimum required permissions. Do not run as Domain Admin.
-- The audit log contains account names and operator identities. Store it on an ACL-controlled share or forward it to a SIEM.
-- Temporary passwords are displayed once in the console and are not written to the log.
-- Use `RemoteSigned` execution policy or code-sign the script for production deployment. Do not use `Bypass` in a managed environment.
+What is demonstrated here: PowerShell guard logic, offline/demo control flow, local logging behavior, static analysis, and mock/unit tests.
 
----
+What is not yet demonstrated: live AD object creation, delegated-permission behavior, domain-controller failover, replication, organization-specific password policy, or production operation.
 
-## Troubleshooting
-
-| Problem | Resolution |
-|---|---|
-| ActiveDirectory module not installed | Install RSAT (see above) or run with -DemoMode |
-| Access denied on user creation | Verify the delegated account has Create User Objects rights on the target OU |
-| Password does not meet complexity requirements | Increase TempPassword length or complexity to satisfy the domain GPO |
-| Script window closes immediately | Run from an open PowerShell console, not by double-clicking the file |
-| CSV import fails | Confirm the file is saved as UTF-8. In Notepad: File > Save As > Encoding: UTF-8 |
-
----
-
-## License
-
-MIT. See LICENSE for terms.
+MIT licensed. See `LICENSE`.
