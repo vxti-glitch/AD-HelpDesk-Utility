@@ -80,10 +80,9 @@ $script:DemoGroups = @{
 
 # ---------------------------------------------------------------------------
 # FUNCTION: Write-Log
-# PURPOSE : Appends a timestamped, structured entry to the audit log file.
-#           Every action (success, failure, info) flows through this function
-#           to ensure a tamper-evident, human-readable compliance trail.
-#           Audit logging is REAL even in Demo Mode.
+# PURPOSE : Appends a timestamped entry to an editable local activity log.
+#           This file is not a security audit trail without access controls,
+#           centralized forwarding, retention, and integrity monitoring.
 # ---------------------------------------------------------------------------
 function Write-Log {
     [CmdletBinding()]
@@ -183,6 +182,53 @@ function Escape-ADDistinguishedNameValue {
     return $escaped
 }
 
+function Get-ADLookupFailureKind {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $typeName = $ErrorRecord.Exception.GetType().FullName
+    $message = $ErrorRecord.Exception.Message
+    if ($typeName -match 'ADIdentityNotFoundException|ADObjectNotFoundException' -or
+        $ErrorRecord.FullyQualifiedErrorId -match 'IdentityNotFound') {
+        return 'NotFound'
+    }
+    if ($typeName -match 'UnauthorizedAccessException|AuthenticationException' -or
+        $message -match 'access is denied|insufficient access|unauthorized') {
+        return 'AccessDenied'
+    }
+    if ($typeName -match 'ADServerDownException|TimeoutException|SocketException' -or
+        $message -match 'server.*unavailable|cannot contact|unreachable|timed out') {
+        return 'Unavailable'
+    }
+    return 'Unknown'
+}
+
+function Test-AllowedOUPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistinguishedName,
+        [Parameter(Mandatory)][string[]]$AllowedBaseDN
+    )
+
+    foreach ($base in $AllowedBaseDN) {
+        if (-not [string]::IsNullOrWhiteSpace($base) -and
+            ($DistinguishedName.Equals($base, [StringComparison]::OrdinalIgnoreCase) -or
+             $DistinguishedName.EndsWith(",$base", [StringComparison]::OrdinalIgnoreCase))) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-ADLookupResultState {
+    [CmdletBinding()]
+    param([AllowNull()][object[]]$Items)
+    $count = @($Items).Count
+    if ($count -eq 0) { return 'ConfirmedMissing' }
+    if ($count -eq 1) { return 'Found' }
+    return 'Ambiguous'
+}
+
 # ---------------------------------------------------------------------------
 # FUNCTION: Invoke-DemoDelay
 # PURPOSE : Adds a realistic 300-800ms pause in Demo Mode to simulate AD
@@ -209,7 +255,7 @@ function Initialize-Environment {
         Write-Host "  " -NoNewline
         Write-Host " DEMO MODE ACTIVE " -ForegroundColor Black -BackgroundColor Yellow
         Write-Host "  All AD operations are simulated. No domain or RSAT required." -ForegroundColor Yellow
-        Write-Host "  Audit log is written to disk normally." -ForegroundColor Yellow
+        Write-Host "  Editable local activity log is written to disk normally." -ForegroundColor Yellow
         Write-Host ""
 
         if ([string]::IsNullOrWhiteSpace($script:Domain)) {
@@ -239,8 +285,8 @@ function Initialize-Environment {
             $script:Domain = (Get-ADDomain -ErrorAction Stop).DNSRoot
         }
         catch {
-            Write-Host "  [WARNING] Could not auto-detect domain." -ForegroundColor Yellow
-            $script:Domain = Read-Host "  Enter your domain DNS name (e.g. contoso.com)"
+            $kind = Get-ADLookupFailureKind -ErrorRecord $_
+            throw "Domain discovery failed ($kind): $($_.Exception.Message)"
         }
     }
 
@@ -249,9 +295,7 @@ function Initialize-Environment {
             $domainDN         = (Get-ADDomain -ErrorAction Stop).DistinguishedName
             $script:DefaultOU = "CN=Users,$domainDN"
         }
-        catch {
-            $script:DefaultOU = ""
-        }
+        catch { throw "Default directory path discovery failed: $($_.Exception.Message)" }
     }
 
     Write-Log -Message "Session started. Domain=$($script:Domain)  DefaultOU=$($script:DefaultOU)" -Level "INFO" -Action "INIT"
@@ -281,7 +325,7 @@ function Show-Menu {
     Write-Host "   [1]  Bulk User Provisioning (from CSV)" -ForegroundColor White
     Write-Host "   [2]  Unlock Account & Reset Password" -ForegroundColor White
     Write-Host "   [3]  Add User to Security Group" -ForegroundColor White
-    Write-Host "   [4]  View Recent Audit Log Entries" -ForegroundColor White
+    Write-Host "   [4]  View Recent Local Activity Log Entries" -ForegroundColor White
     Write-Host "   [Q]  Quit" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  ============================================================" -ForegroundColor DarkCyan
@@ -307,13 +351,21 @@ function Show-Menu {
 # ---------------------------------------------------------------------------
 function Invoke-BulkProvisioning {
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [string]$CsvPath,
+        [string]$ParentOU,
+        [string[]]$AllowedBaseDN,
+        [switch]$CreateMissingOUs
+    )
 
     Write-Host ""
     Write-Host "  -- Bulk User Provisioning ------------------------------------------" -ForegroundColor DarkCyan
     Write-Log -Message "Bulk provisioning initiated." -Level "INFO" -Action "BulkProvision"
 
-    $csvPath = Read-Host "  Enter full path to the CSV file"
+    $csvPath = $CsvPath
+    if ([string]::IsNullOrWhiteSpace($csvPath)) {
+        $csvPath = Read-Host "  Enter full path to the CSV file"
+    }
     $csvPath = $csvPath.Trim().Trim('"')
 
     if (-not (Test-Path -Path $csvPath -PathType Leaf)) {
@@ -355,16 +407,30 @@ function Invoke-BulkProvisioning {
         $domainDN = "DC=contoso,DC=demo"
     }
     else {
-        $domainDN = (Get-ADDomain -ErrorAction Stop).DistinguishedName
+        try { $domainDN = (Get-ADDomain -ErrorAction Stop).DistinguishedName }
+        catch {
+            Write-Log -Message "Domain lookup failed; no provisioning attempted. Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
+            Pause-AndReturn
+            return
+        }
     }
 
     $defaultParentOU = if ([string]::IsNullOrWhiteSpace($script:DefaultOU)) { $domainDN } else { $script:DefaultOU }
     Write-Host ""
-    Write-Host "  Department OUs will be created under a parent OU." -ForegroundColor Gray
+    Write-Host "  Department OUs must already exist unless -CreateMissingOUs is explicitly used." -ForegroundColor Gray
     Write-Host "  Example: OU=Staff,$domainDN" -ForegroundColor Gray
     Write-Host "  Default: $defaultParentOU" -ForegroundColor Gray
-    $parentOU = Read-Host "  Enter parent OU distinguished name (press ENTER for default)"
+    $parentOU = $ParentOU
+    if ([string]::IsNullOrWhiteSpace($parentOU)) {
+        $parentOU = Read-Host "  Enter parent OU distinguished name (press ENTER for default)"
+    }
     if ([string]::IsNullOrWhiteSpace($parentOU)) { $parentOU = $defaultParentOU }
+    if (-not $AllowedBaseDN -or $AllowedBaseDN.Count -eq 0) { $AllowedBaseDN = @($defaultParentOU) }
+    if (-not (Test-AllowedOUPath -DistinguishedName $parentOU -AllowedBaseDN $AllowedBaseDN)) {
+        Write-Log -Message "Parent OU '$parentOU' is outside the allowed base DN list. No changes made." -Level "ERROR" -Action "BulkProvision"
+        Pause-AndReturn
+        return
+    }
 
     $created = 0
     $skipped = 0
@@ -413,34 +479,62 @@ function Invoke-BulkProvisioning {
             $departmentDn = Escape-ADDistinguishedNameValue -Value $department
             $deptOUName = "OU=$departmentDn,$parentOU"
             $ouExists   = ($department -in @("Finance","Engineering","Human Resources","IT Support","Marketing"))
-            if (-not $ouExists) {
-                Write-Log -Message "Created new OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
+            if (-not $ouExists -and -not $CreateMissingOUs) {
+                Write-Log -Message "SKIP -- Department OU '$deptOUName' is missing; automatic creation is disabled." -Level "WARNING" -Action "BulkProvision"
+                $skipped++
+                continue
+            }
+            if (-not $ouExists -and $CreateMissingOUs) {
+                if ($PSCmdlet.ShouldProcess($deptOUName, "Simulate department OU creation")) {
+                    Write-Log -Message "SIMULATED creation of OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
+                }
+                else {
+                    Write-Log -Message "WhatIf: planned OU creation for '$department'; user creation skipped because the OU does not exist." -Level "WARNING" -Action "BulkProvision"
+                    $skipped++
+                    continue
+                }
             }
 
-            # ---- DEMO: Simulate New-ADUser ----
-            # Add to demo users dictionary so subsequent duplicates are caught this session
-            $script:DemoUsers[$sam] = [PSCustomObject]@{
-                SamAccountName    = $sam
-                DisplayName       = $displayName
-                UserPrincipalName = $upn
-                LockedOut         = $false
-                Enabled           = $true
-                BadLogonCount     = 0
-                PasswordLastSet   = Get-Date
-                LastLogonDate     = $null
-                MemberOf          = @()
+            if ($PSCmdlet.ShouldProcess($upn, "Simulate AD user creation")) {
+                # Add to demo users dictionary so subsequent duplicates are caught this session.
+                $script:DemoUsers[$sam] = [PSCustomObject]@{
+                    SamAccountName    = $sam
+                    DisplayName       = $displayName
+                    UserPrincipalName = $upn
+                    LockedOut         = $false
+                    Enabled           = $true
+                    BadLogonCount     = 0
+                    PasswordLastSet   = Get-Date
+                    LastLogonDate     = $null
+                    MemberOf          = @()
+                }
+                Write-Log -Message "SIMULATED user creation for '$sam' ($displayName) | Dept=$department | OU=$deptOUName | UPN=$upn" -Level "SUCCESS" -Action "BulkProvision"
+                $created++
             }
-
-            Write-Log -Message "CREATED user '$sam' ($displayName) | Dept=$department | OU=$deptOUName | UPN=$upn" -Level "SUCCESS" -Action "BulkProvision"
-            $created++
+            else {
+                Write-Log -Message "WhatIf: planned simulated user creation for '$sam'; no demo state changed." -Level "WARNING" -Action "BulkProvision"
+                $skipped++
+            }
         }
         else {
             # ---- REAL MODE ----
             $existingUser = $null
             $samFilter = Escape-ADFilterLiteral -Value $sam
-            try { $existingUser = Get-ADUser -Filter "SamAccountName -eq '$samFilter'" -ErrorAction Stop } catch { $existingUser = $null }
+            try { $existingUser = @(Get-ADUser -Filter "SamAccountName -eq '$samFilter'" -ErrorAction Stop) }
+            catch {
+                $kind = Get-ADLookupFailureKind -ErrorRecord $_
+                Write-Log -Message "User lookup for '$sam' failed ($kind); creation was not attempted. Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
+                $failed++
+                continue
+            }
 
-            if ($null -ne $existingUser) {
+            $userLookupState = Get-ADLookupResultState -Items $existingUser
+            if ($userLookupState -eq 'Ambiguous') {
+                Write-Log -Message "User lookup for '$sam' returned multiple objects; creation was not attempted." -Level "ERROR" -Action "BulkProvision"
+                $failed++
+                continue
+            }
+            if ($userLookupState -eq 'Found') {
                 Write-Log -Message "SKIP -- User '$sam' already exists. Skipping $displayName." -Level "WARNING" -Action "BulkProvision"
                 $skipped++
                 continue
@@ -449,23 +543,52 @@ function Invoke-BulkProvisioning {
             $departmentDn = Escape-ADDistinguishedNameValue -Value $department
             $deptOUName = "OU=$departmentDn,$parentOU"
             $targetOU   = $deptOUName
+            if (-not (Test-AllowedOUPath -DistinguishedName $targetOU -AllowedBaseDN $AllowedBaseDN)) {
+                Write-Log -Message "Target OU '$targetOU' is outside the allowed base DN list. User '$sam' was not created." -Level "ERROR" -Action "BulkProvision"
+                $failed++
+                continue
+            }
             $ouExists   = $null
             $deptOUFilter = Escape-ADFilterLiteral -Value $deptOUName
-            try { $ouExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$deptOUFilter'" -ErrorAction Stop } catch { $ouExists = $null }
+            try { $ouExists = @(Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$deptOUFilter'" -ErrorAction Stop) }
+            catch {
+                $kind = Get-ADLookupFailureKind -ErrorRecord $_
+                Write-Log -Message "OU lookup for '$deptOUName' failed ($kind); user '$sam' was not created. Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
+                $failed++
+                continue
+            }
 
-            if ($null -eq $ouExists) {
+            $ouLookupState = Get-ADLookupResultState -Items $ouExists
+            if ($ouLookupState -eq 'Ambiguous') {
+                Write-Log -Message "OU lookup for '$deptOUName' was ambiguous; user '$sam' was not created." -Level "ERROR" -Action "BulkProvision"
+                $failed++
+                continue
+            }
+
+            if ($ouLookupState -eq 'ConfirmedMissing') {
+                if (-not $CreateMissingOUs) {
+                    Write-Log -Message "Target OU '$deptOUName' does not exist and automatic creation is disabled. User '$sam' was not created." -Level "ERROR" -Action "BulkProvision"
+                    $failed++
+                    continue
+                }
                 try {
+                    if (-not $WhatIfPreference -and -not $PSCmdlet.ShouldContinue("Create '$deptOUName'? This requires delegated OU-creation permission.", "Confirm separate OU creation")) {
+                        Write-Log -Message "Operator declined OU creation for '$deptOUName'. User '$sam' was not created." -Level "WARNING" -Action "BulkProvision"
+                        $skipped++
+                        continue
+                    }
                     if ($PSCmdlet.ShouldProcess($deptOUName, "Create department OU")) {
                         New-ADOrganizationalUnit -Name $department -Path $parentOU -ProtectedFromAccidentalDeletion $true -ErrorAction Stop
                         Write-Log -Message "Created new OU '$department' under '$parentOU'." -Level "INFO" -Action "BulkProvision"
                     }
                     else {
-                        Write-Log -Message "WhatIf: skipped OU creation for '$department' under '$parentOU'." -Level "WARNING" -Action "BulkProvision"
+                        Write-Log -Message "WhatIf: planned OU creation for '$department'; user creation will also remain planned only." -Level "WARNING" -Action "BulkProvision"
                     }
                 }
                 catch {
-                    Write-Log -Message "Could not create OU '$department'. Placing in parent OU. Error: $($_.Exception.Message)" -Level "WARNING" -Action "BulkProvision"
-                    $targetOU = $parentOU
+                    Write-Log -Message "Could not create OU '$department'; user '$sam' was not created. Error: $($_.Exception.Message)" -Level "ERROR" -Action "BulkProvision"
+                    $failed++
+                    continue
                 }
             }
 
@@ -493,7 +616,15 @@ function Invoke-BulkProvisioning {
                     $newUserParams["Manager"] = $managerObj.DistinguishedName
                 }
                 catch {
-                    Write-Log -Message "Manager '$managerSam' not found for $displayName -- skipping manager attribute." -Level "WARNING" -Action "BulkProvision"
+                    $kind = Get-ADLookupFailureKind -ErrorRecord $_
+                    if ($kind -eq 'NotFound') {
+                        Write-Log -Message "Manager '$managerSam' was confirmed missing for $displayName; manager attribute omitted." -Level "WARNING" -Action "BulkProvision"
+                    }
+                    else {
+                        Write-Log -Message "Manager lookup for '$managerSam' failed ($kind); user '$sam' was not created." -Level "ERROR" -Action "BulkProvision"
+                        $failed++
+                        continue
+                    }
                 }
             }
 
@@ -565,7 +696,13 @@ function Invoke-AccountUnlockReset {
                                  -ErrorAction Stop
         }
         catch {
-            Write-Log -Message "User '$sam' not found in AD. Error: $($_.Exception.Message)" -Level "ERROR" -Action "UnlockReset"
+            $kind = Get-ADLookupFailureKind -ErrorRecord $_
+            $message = if ($kind -eq 'NotFound') {
+                "User '$sam' was not found in AD."
+            } else {
+                "User lookup for '$sam' failed ($kind); no account changes were attempted. Error: $($_.Exception.Message)"
+            }
+            Write-Log -Message $message -Level "ERROR" -Action "UnlockReset"
             Pause-AndReturn
             return
         }
@@ -649,7 +786,7 @@ function Invoke-AccountUnlockReset {
         if ($PSCmdlet.ShouldProcess($sam, "Reset password and require change at next logon")) {
             if ($script:DemoMode) {
                 $script:DemoUsers[$sam].PasswordLastSet = Get-Date
-                # (Password itself is not stored — same as real AD behavior for compliance)
+                # The temporary password is deliberately not persisted.
             }
             else {
                 $securePass = ConvertTo-SecureString -String $newPassRaw -AsPlainText -Force
@@ -719,7 +856,9 @@ function Invoke-GroupManagement {
             $adUser = Get-ADUser -Identity $sam -Properties DisplayName, MemberOf -ErrorAction Stop
         }
         catch {
-            Write-Log -Message "User '$sam' not found in AD. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
+            $kind = Get-ADLookupFailureKind -ErrorRecord $_
+            $message = if ($kind -eq 'NotFound') { "User '$sam' was not found in AD." } else { "User lookup for '$sam' failed ($kind); no group change was attempted. Error: $($_.Exception.Message)" }
+            Write-Log -Message $message -Level "ERROR" -Action "GroupMgmt"
             Pause-AndReturn
             return
         }
@@ -730,13 +869,29 @@ function Invoke-GroupManagement {
             $adGroup = Get-ADGroup -Identity $groupName -Properties GroupCategory, GroupScope, Members -ErrorAction Stop
         }
         catch {
+            $identityFailure = Get-ADLookupFailureKind -ErrorRecord $_
+            if ($identityFailure -ne 'NotFound') {
+                Write-Log -Message "Group lookup for '$groupName' failed ($identityFailure); no group change was attempted. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
+                Pause-AndReturn
+                return
+            }
             try {
                 $groupFilter = Escape-ADFilterLiteral -Value $groupName
                 $adGroup = Get-ADGroup -Filter "Name -eq '$groupFilter'" -Properties GroupCategory, GroupScope -ErrorAction Stop
-                if ($null -eq $adGroup) { throw "Group not found." }
+                if (@($adGroup).Count -eq 0) {
+                    Write-Log -Message "Group '$groupName' was not found in AD." -Level "ERROR" -Action "GroupMgmt"
+                    Pause-AndReturn
+                    return
+                }
+                if (@($adGroup).Count -gt 1) {
+                    Write-Log -Message "Group lookup for '$groupName' was ambiguous; no group change was attempted." -Level "ERROR" -Action "GroupMgmt"
+                    Pause-AndReturn
+                    return
+                }
             }
             catch {
-                Write-Log -Message "Group '$groupName' not found in AD. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
+                $kind = Get-ADLookupFailureKind -ErrorRecord $_
+                Write-Log -Message "Group search for '$groupName' failed ($kind); no group change was attempted. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
                 Pause-AndReturn
                 return
             }
@@ -767,7 +922,9 @@ function Invoke-GroupManagement {
             $isMember   = ($membership | Where-Object { $_.SamAccountName -eq $sam }) -ne $null
         }
         catch {
-            Write-Log -Message "Could not enumerate group members for pre-check. Error: $($_.Exception.Message)" -Level "WARNING" -Action "GroupMgmt"
+            Write-Log -Message "Could not determine existing membership; add operation was not attempted. Error: $($_.Exception.Message)" -Level "ERROR" -Action "GroupMgmt"
+            Pause-AndReturn
+            return
         }
     }
 
@@ -805,12 +962,12 @@ function Invoke-GroupManagement {
 
 # ---------------------------------------------------------------------------
 # FUNCTION: Show-RecentLogs
-# PURPOSE : Displays the last N lines of the audit log in the console.
+# PURPOSE : Displays the last N lines of the local activity log in the console.
 #           Fully real in both modes — the log file always exists after any action.
 # ---------------------------------------------------------------------------
 function Show-RecentLogs {
     Write-Host ""
-    Write-Host "  -- Recent Audit Log Entries ----------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "  -- Recent Local Activity Log Entries ------------------------------" -ForegroundColor DarkCyan
     Write-Host "  Log file: $script:LogPath" -ForegroundColor Gray
     Write-Host ""
 
