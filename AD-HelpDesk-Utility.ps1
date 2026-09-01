@@ -8,7 +8,7 @@
     An interactive command-line utility for Help Desk technicians to perform
     common Active Directory tasks without opening ADUC (Active Directory Users
     and Computers). Supports bulk user provisioning from CSV, account unlock and
-    password reset, security group management, and compliance-grade audit logging.
+    password reset, security group management, and an editable structured local activity log.
 
     Use -DemoMode to run a fully simulated session with no AD infrastructure
     required. Ideal for portfolios, training environments, and offline demos.
@@ -29,7 +29,7 @@
 
 .EXAMPLE
     .\AD-HelpDesk-Utility.ps1 -LogPath "D:\Logs\ADHelpDesk.log"
-    Launches the tool and writes audit logs to a custom path.
+    Launches the tool and writes the local activity log to a custom path.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -38,7 +38,7 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$DemoMode,
 
-    # Path to the audit log file. Defaults to a timestamped log in the script directory.
+    # Path to the editable local activity log. Defaults to a monthly file.
     [Parameter(Mandatory = $false)]
     [string]$LogPath = "$PSScriptRoot\Logs\ADHelpDesk_$(Get-Date -Format 'yyyy-MM').log",
 
@@ -48,7 +48,13 @@ param(
 
     # Default domain for UPN suffixes. Auto-detected if left blank (or set to demo value).
     [Parameter(Mandatory = $false)]
-    [string]$Domain = ""
+    [string]$Domain = "",
+
+    # Explicitly permit creation of missing department OUs. Disabled by default.
+    [switch]$CreateMissingOUs,
+
+    # Distinguished-name boundaries within which provisioning is allowed.
+    [string[]]$AllowedBaseDN = @()
 )
 
 # ---------------------------------------------------------------------------
@@ -86,14 +92,14 @@ while ($running) {
     $choice = Show-Menu
 
     switch ($choice.ToUpper()) {
-        "1" { Invoke-BulkProvisioning   }
+        "1" { Invoke-BulkProvisioning -CreateMissingOUs:$CreateMissingOUs -AllowedBaseDN $AllowedBaseDN -WhatIf:$WhatIfPreference }
         "2" { Invoke-AccountUnlockReset }
         "3" { Invoke-GroupManagement    }
         "4" { Show-RecentLogs           }
         "Q" {
             Write-Log -Message "Session ended by operator." -Level "INFO" -Action "INIT"
             Write-Host ""
-            Write-Host "  Goodbye. Audit log saved to: $script:LogPath" -ForegroundColor Cyan
+            Write-Host "  Goodbye. Local activity log saved to: $script:LogPath" -ForegroundColor Cyan
             Write-Host ""
             $running = $false
         }
